@@ -1,0 +1,948 @@
+# PlanPhase — Kế hoạch triển khai AI Workforce
+
+**Dự án:** AI Workforce cho E-commerce B2C  
+**Mục tiêu:** Xây dựng hệ thống production-ready, trong đó LLM chỉ lập kế hoạch/điều phối; mọi quyền hạn, business rule, transaction và thao tác ghi do backend xác định kiểm soát.  
+**Tài liệu kiến trúc tham chiếu:** [`KẾ HOẠCH TRIỂN KHAI ĐỒ ÁN AI WORKFO.md`](KẾ HOẠCH%20TRIỂN%20KHAI%20ĐỒ%20ÁN%20AI%20WORKFO.md)
+
+**Vai trò và thứ tự ưu tiên:** tài liệu kiến trúc mô tả nguyên tắc và kiến trúc đích; file `PlanPhase.md` là nguồn chuẩn về phạm vi MVP, thứ tự phase và gate triển khai. Nếu hai tài liệu khác nhau, cập nhật tài liệu kiến trúc để khớp với phạm vi và thứ tự trong file này.
+
+---
+
+## 0. Quy ước triển khai
+
+### 0.1. Vertical slice MVP
+
+Luồng phải hoàn thiện đầu tiên:
+
+```text
+Authenticated Request
+→ Executive Planner
+→ Data Agent + Supply Chain Agent
+→ Validator
+→ Risk Classifier
+→ Approval Gate nếu cần
+→ Deterministic Business Service
+→ Audit Trail
+→ Dashboard/Report
+```
+
+MVP tập trung vào:
+
+- Executive Planner, Data Agent, Supply Chain Agent, Validator, Risk Classifier, Approval, Inventory Service, Audit và Operator Dashboard/Report.
+- Đọc doanh thu, AOV, sản phẩm bán chạy và tồn kho thấp.
+- Đề xuất thay đổi tồn kho.
+- Thực thi cập nhật tồn kho có transaction, idempotency và approval.
+- Customer Support, Returns, Shipments và Fulfillment nằm ngoài MVP, chuyển sang Phase 11.
+
+### 0.2. Quy tắc không được phá vỡ
+
+- Agent không gọi Database hoặc Repository trực tiếp.
+- LLM không quyết định `tenant_id`, `customer_id`, `actor_id`, role hoặc permission.
+- Không có Tool ngoài allowlist được đăng ký ở code.
+- Mọi write action phải có `workflow_id`, `idempotency_key`, `actor_id`, `payload_hash`.
+- Authorization, Policy Engine, schema validation và audit chạy trước/sau mọi write.
+- Mọi lỗi không xác định trạng thái write đều chuyển sang trạng thái cần xử lý thủ công.
+- Không mở quyền write trong production trước khi hoàn tất Shadow Mode và Assist Mode.
+- Không mở inventory write nếu source of truth, external failure semantics và reconciliation strategy chưa được chốt; khi chưa chốt chỉ được mock/read-only.
+
+### 0.3. Definition of Done chung
+
+Một hạng mục chỉ hoàn thành khi:
+
+1. Có code và test tương ứng.
+2. Có schema/contract rõ ràng.
+3. Có structured logs chứa `workflow_id`.
+4. Có xử lý lỗi và trạng thái thất bại.
+5. Có kiểm thử quyền hợp lệ và quyền bị từ chối.
+6. Không làm lộ PII/secrets trong log hoặc response.
+7. CI chạy được các test liên quan.
+8. Có tài liệu ngắn về cách vận hành hoặc rollback nếu là hạng mục production.
+
+### 0.4. Quản lý tiến độ và ngưỡng nghiệm thu
+
+- Mỗi deliverable phải có một người chịu trách nhiệm, người nghiệm thu, ước lượng effort, ngày mục tiêu và trạng thái trong issue tracker trước khi bắt đầu phase.
+- Phase 0 lập acceptance-threshold registry. Mỗi ngưỡng cần có tên metric, định nghĩa/cách đo, giá trị mục tiêu, bộ dữ liệu hoặc artifact, lệnh test/CI job, người chịu trách nhiệm và người chốt ngưỡng.
+- Không tự đặt ngưỡng chất lượng hoặc ngày hoàn thành khi chưa có baseline và thống nhất của người phụ trách nghiệp vụ/kỹ thuật.
+
+### 0.5. Đối chiếu với lộ trình trong tài liệu kiến trúc
+
+Các giai đoạn cũ gom nhiều loại công việc; bảng dưới đây đối chiếu phạm vi bao phủ, không phải quan hệ một-một. Khi triển khai, dependency và gate trong PlanPhase quyết định thứ tự.
+
+| Lộ trình cũ trong tài liệu kiến trúc | Phase chuẩn trong file này | Ghi chú |
+|---|---|---|
+| Giai đoạn 0 — Nền tảng và tiêu chí thành công | Phase 0–1 | Chốt quyết định và dựng môi trường phát triển. |
+| Giai đoạn 1 — Dữ liệu và bảo mật | Phase 2–5 | Tách schema/RLS, authorization, service, idempotency và audit thành các gate rõ ràng. |
+| Giai đoạn 2 — Service, Policy và Authorization | Phase 3–5 | Các phần policy, service và write safety được triển khai theo dependency. |
+| Giai đoạn 3 — Agent và Tool Binding | Phase 6 | Chỉ gồm ba Agent MVP: Data, Supply Chain và Executive Planner. |
+| Giai đoạn 4 — Điều phối và trạng thái | Phase 7 | LangGraph, Validator, approval và phục hồi workflow. |
+| Giai đoạn 5 — Giao diện và Execution Trace | Phase 8 | Operator/Executive UI, report, approval và trace; customer chat là post-MVP. |
+| Giai đoạn 6 — Đánh giá và vận hành | Phase 9–10 | Hardening, staging, shadow/assist và rollout. |
+| Mở rộng nghiệp vụ sau MVP | Phase 11 | Customer Support, Returns, Shipments và Fulfillment. |
+
+---
+
+# Phase 0 — Chốt phạm vi, nguồn dữ liệu và quyết định nền tảng
+
+## Mục tiêu
+
+Loại bỏ các giả định chưa được kiểm chứng trước khi thiết kế schema, service và Agent.
+
+## Công việc
+
+### Phase 0.1. Khảo sát nghiệp vụ
+
+- Xác định nguồn dữ liệu đơn hàng, sản phẩm, tồn kho và vận chuyển thực tế.
+- Xác định hệ thống nào là source of truth cho từng loại dữ liệu.
+- Xác định các trạng thái đơn hàng, trạng thái vận chuyển và quy trình đổi trả thật.
+- Xác định ai được xem, sửa hoặc phê duyệt tồn kho.
+- Xác định đơn vị tổ chức/merchant/tenant nếu có nhiều cửa hàng.
+- Xác định múi giờ, tiền tệ, thuế và cách tính doanh thu/AOV.
+
+### Phase 0.2. Integration boundary và source of truth
+
+- Viết contract/API/webhook của hệ thống order/inventory thật.
+- Vẽ sequence diagram cho read/write và xác định ownership của từng trường dữ liệu.
+- Chốt quy tắc stale data, reconciliation, duplicate/out-of-order webhook và manual reconciliation.
+- Xác định semantics at-least-once/exactly-once thực tế; không tuyên bố exactly-once cho external side effect nếu chưa chứng minh được.
+- Chốt backup/restore, RPO/RTO và migration rollback target.
+
+### Phase 0.3. Chốt stack kỹ thuật
+
+- Python và runtime version.
+- LangGraph version.
+- Database transactional chính.
+- Redis/cache nếu cần.
+- Queue/background worker nếu workflow có thời gian chờ.
+- LLM provider và model fallback.
+- API framework, UI framework và cách triển khai container.
+- CI/CD, secret manager và môi trường dev/staging/production.
+
+### Phase 0.4. Chốt contract MVP
+
+- Định nghĩa `RequestContext`.
+- Định nghĩa workflow states.
+- Định nghĩa Agent input/output schemas.
+- Định nghĩa Tool schemas.
+- Định nghĩa risk thresholds.
+- Định nghĩa approval roles và approval SLA.
+- Định nghĩa SLO và giới hạn chi phí ban đầu.
+- Đăng ký ngưỡng cho golden set, tool-call accuracy, validator correctness và cost/workflow theo quy ước tại mục 0.4; ngưỡng phải được chốt trước khi dùng làm gate.
+
+## Deliverables
+
+- `ADR-001` về ranh giới LLM/deterministic core.
+- `ADR-002` về nguồn dữ liệu và source of truth.
+- `ADR-003` về Database, queue và LLM provider.
+- `ADR-004` về integration boundary và source-of-truth policy.
+- Contract/API/webhook và sequence diagram read/write của hệ thống ngoài.
+- Chính sách stale data, reconciliation, duplicate/out-of-order webhook và manual reconciliation.
+- Mục tiêu backup/restore, RPO/RTO và migration rollback.
+- Ma trận actor/role/scope.
+- Danh sách MVP và danh sách out-of-scope.
+- Bộ acceptance criteria và acceptance-threshold registry cho toàn bộ MVP.
+
+## Gate kiểm tra
+
+- Không còn câu hỏi chưa trả lời về tenant, actor, nguồn dữ liệu và quyền write.
+- Có thể mô tả chính xác một workflow từ request đến database.
+- Có quyết định rollback nếu nguồn dữ liệu thật chưa sẵn sàng.
+- Không mở inventory write nếu source of truth, failure semantics và reconciliation strategy chưa được chốt.
+
+---
+
+# Phase 1 — Khởi tạo repository, môi trường và chất lượng mã nguồn
+
+## Mục tiêu
+
+Tạo nền tảng phát triển lặp lại được, có kiểm tra tự động và tách môi trường.
+
+## Công việc
+
+- Tạo cấu trúc thư mục theo kiến trúc: `api`, `agents`, `orchestration`, `tools`, `services`, `business`, `security`, `audit`, `database`, `schemas`, `approvals`, `llm`, `observability`, `evaluation`, `ui`, `config`, `fixtures`, `tests`.
+- Tạo dependency lockfile và cấu hình formatter/linter/type checker.
+- Tạo `.env.example`, config theo môi trường và quy tắc không commit secret.
+- Tạo Docker/dev container nếu phù hợp.
+- Tạo CI tối thiểu: lint, type check, unit tests, security tests.
+- Thiết lập migration framework.
+- Thiết lập structured logging với correlation IDs từ ngày đầu.
+- Tạo health check cho API, Database và LLM provider.
+- Thiết lập secret scan và dependency scan trong CI.
+- Tạo cost accounting interface (stub hoặc real) để tracking từ đầu.
+- Tạo test harness cho authorization, policy, idempotency và audit tests sẽ chạy từ Phase 2–3.
+
+## Deliverables
+
+- Repository chạy được từ môi trường mới.
+- CI bắt buộc chạy trước merge.
+- Template cấu hình dev/staging/production.
+- Test mẫu chứng minh CI hoạt động.
+- Secret scan và dependency scan pass.
+- Cost accounting interface và correlation ID có trong structured logs.
+
+## Gate kiểm tra
+
+- Người khác có thể clone, cài đặt và chạy test bằng tài liệu hướng dẫn.
+- Không có secret thật trong repository.
+- Lint/type check/test đều pass.
+- Structured log có correlation ID; secret scan và dependency scan pass.
+- Test harness cho các suite security/evaluation tối thiểu chạy được từ CI.
+
+---
+
+# Phase 2 — Data model, migration và Repository layer
+
+## Mục tiêu
+
+Xây nền dữ liệu có transaction, isolation và auditability trước khi viết Agent.
+
+## Công việc
+
+### 2.1. Schema MVP
+
+Triển khai trước:
+
+- `tenants` nếu multi-tenant.
+- `users`/`actors`.
+- `products`.
+- `warehouses`.
+- `inventory`.
+- `orders`.
+- `order_items`.
+
+Các bảng `customers`, `shipments`, `returns` và `support_tickets` chuyển sang post-MVP Phase 11 nếu integration thực tế yêu cầu.
+
+Bảng kiểm soát bắt buộc:
+
+- `inventory_movements`.
+- `idempotency_keys`.
+- `audit_events`.
+- `workflow_runs` và checkpoint nếu cần persistence riêng cho LangGraph.
+
+`approval_requests` chỉ được thêm khi approval flow được mở trong MVP; các bảng support/returns/shipments không thuộc schema MVP.
+
+### 2.2. Ràng buộc dữ liệu
+
+- Foreign keys và unique constraints.
+- Index theo `tenant_id`, `customer_id`, `order_id`, `product_id`, `warehouse_id`.
+- Check constraint cho số lượng, giá trị và trạng thái.
+- Timestamps UTC.
+- Soft delete chỉ khi nghiệp vụ cho phép.
+- Migration có version và rollback strategy.
+
+### 2.3. Repository
+
+- Repository chỉ chịu trách nhiệm persistence.
+- Không đưa business rule vào repository.
+- Mọi query có scope từ `RequestContext`.
+- Tách read repository và write repository nếu giúp kiểm soát quyền.
+- Chuẩn hóa lỗi: not found, conflict, constraint violation, transient DB failure.
+
+### 2.4. Row-Level Security
+
+- Thiết kế policy theo `tenant_id`.
+- Với customer-facing request, buộc `customer_id` từ authenticated context.
+- Không nhận `tenant_id/customer_id/actor_id` do LLM sinh làm nguồn sự thật.
+- Tách hai tầng RLS: application layer kiểm tra scope trước query và database layer enforce policy bằng connection context.
+- Đặc tả application role, migration role, connection-pool context và background worker context.
+- Context tenant không được reuse sai giữa request; worker phải set/reset context tường minh.
+- Viết test cross-tenant, cross-customer và tenant-context không bị reuse.
+
+## Deliverables
+
+- ERD và migration.
+- Seed/mock data có trọng số.
+- Repository interfaces và implementation.
+- Test isolation dữ liệu.
+- Test transaction rollback.
+- RLS policy cho application/DB/worker context và test không reuse sai tenant context.
+
+## Gate kiểm tra
+
+- Database trống có thể migrate lên đầy đủ bằng một lệnh chuẩn.
+- User A không thể đọc dữ liệu của User B.
+- Không có repository method bỏ qua scope.
+- Tồn kho không thể âm nếu policy hiện tại cấm.
+
+---
+
+# Phase 3 — Identity, Authorization và Policy Engine
+
+## Mục tiêu
+
+Xây security boundary thực sự trước khi mở Tool cho Agent.
+
+## Công việc
+
+### 3.1. RequestContext
+
+- Parse token đã xác thực.
+- Xác định `actor_id`, `actor_type`, `roles`, `tenant_id`, `customer_id`, `scopes`, `session_id`, `workflow_id`.
+- Reject request thiếu hoặc sai claim.
+- Không tin identity do request body hoặc LLM cung cấp.
+
+### 3.2. Authorization Engine
+
+- Implement tool allowlist theo agent role.
+- Kiểm tra actor role, tenant scope, warehouse scope và action.
+- Trả mã lỗi ổn định: `DENIED`, `OUT_OF_SCOPE`, `INVALID_IDENTITY`.
+- Fail closed nếu policy/config không tải được.
+- Không cho phép runtime prompt sửa permission matrix.
+
+### 3.3. Policy Engine
+
+- `ALLOW`, `DENY`, `REQUIRE_APPROVAL`.
+- Rule cho tồn kho âm, ngưỡng thay đổi, warehouse scope, order state và return window.
+- Rule theo tenant/config nhưng không cho LLM tự thay đổi.
+- Version hóa policy để audit biết rule nào đã áp dụng.
+
+### 3.4. Risk classification
+
+Risk classifier là deterministic, không dùng LLM; threshold lấy từ registry/config có version và policy/risk version phải được lưu trong approval/audit. Registry tối thiểu gồm:
+
+- Số lượng delta.
+- Giá trị hàng hóa.
+- Số SKU/warehouse/order bị tác động.
+- Khả năng hoàn tác.
+- Trạng thái bất thường của resource.
+
+- LOW: đọc dữ liệu.
+- MEDIUM: write nhỏ, có thể hoàn tác.
+- HIGH: write lớn hoặc ảnh hưởng nhiều đối tượng.
+- CRITICAL: tài chính/hủy hàng loạt/không thể hoàn tác.
+
+## Deliverables
+
+- Permission matrix trong code.
+- Authorization service.
+- Policy registry/version.
+- Risk classifier deterministic và risk-threshold registry có version.
+- Security test suite.
+
+## Gate kiểm tra
+
+Phải pass toàn bộ:
+
+- Customer Support không gọi được `update_stock` (test gate giữ để bảo vệ regression, dù Agent này post-MVP).
+- Data Agent không gọi được bất kỳ write tool nào.
+- Executive không gọi trực tiếp business tool.
+- Supply Agent chỉ thao tác warehouse được cấp.
+- Cross-tenant/cross-customer access bị chặn.
+- Policy lỗi hoặc không tải được thì không mở quyền.
+
+---
+
+# Phase 4 — Deterministic business services, Tool layer và idempotency/audit contract
+
+## Mục tiêu
+
+Tạo lõi nghiệp vụ ổn định; Tool chỉ là adapter được Agent gọi, không chứa quyền vượt Service. Idempotency foundation, audit event contract và concurrency primitive phải hoàn thành trước khi mở tool write.
+
+## Công việc
+
+### 4.1. Service MVP
+
+- `OrderService`: tra cứu đơn thuộc scope.
+- `InventoryService`: kiểm tra và cập nhật tồn kho.
+- `AnalyticsService`: doanh thu, AOV, top products, low-stock stats.
+- `ApprovalService`: tạo, duyệt, từ chối và hết hạn approval.
+- Fulfillment Service chuyển sang post-MVP Phase 11 cùng domain shipping/fulfillment.
+- `AuditService`: ghi event append-only.
+
+### 4.2. Tool contract
+
+Mỗi Tool phải khai báo:
+
+- Tool name/version.
+- Input schema.
+- Output schema.
+- Allowed agents.
+- Required scopes.
+- Risk level.
+- Idempotency requirement.
+- Timeout/retry behavior.
+- PII policy.
+
+Tool MVP:
+
+- `check_stock`.
+- `update_stock`.
+- `calculate_revenue`.
+- `calculate_aov`.
+- `get_top_products`.
+- `get_low_stock_stats`.
+- `get_order` hoặc `get_my_order` tùy actor model.
+
+### 4.3. Write safety và concurrency
+
+- Transaction boundary tại Service.
+- `idempotency_key` bắt buộc.
+- Unique constraint gồm tenant, actor/operation và idempotency key theo mô hình đã chốt.
+- Payload canonicalization và `payload_hash`.
+- `inventory_movements` cho mọi thay đổi.
+- Response snapshot lưu trong idempotency record.
+- Cùng key + cùng payload trả snapshot; cùng key + payload khác trả conflict.
+- Hai request đồng thời chỉ một request được execute.
+- Concurrent inventory update dùng row lock hoặc optimistic version; balance không được sai.
+- Không retry write nếu trạng thái chưa xác định mà chưa kiểm tra idempotency.
+
+### 4.4. Audit event contract
+
+- Event có `workflow_id`, tenant/actor, agent/tool/action, input/output đã redact, result, duration, risk, approval và cost.
+- Business audit atomic với mutation trong cùng transaction; telemetry có thể eventual consistency.
+- Audit event append-only, có schema/version và liên kết tới payload hash.
+- Tách vật lý LangGraph State khỏi Audit Trail; state phục vụ resume, audit phục vụ truy vết bất biến.
+
+## Deliverables
+
+- Service interfaces và tests.
+- Tool registry.
+- Tool schema validation.
+- Idempotency foundation/middleware và concurrency primitive.
+- Audit event schema/contract và atomic write hook.
+
+## Gate kiểm tra
+
+- Gọi lại cùng idempotency key và cùng payload trả snapshot, không làm thay đổi dữ liệu lần hai.
+- Cùng key nhưng payload khác trả conflict.
+- Hai request đồng thời chỉ một request execute.
+- Timeout sau khi commit không làm retry ghi trùng.
+- Vi phạm rule bị chặn trước transaction.
+- Không có Tool nào gọi repository ngoài Service.
+- Inventory write chỉ mở sau khi Phase 0 đã chốt source of truth và reconciliation.
+
+---
+
+# Phase 5 — Audit, idempotency và workflow persistence hardening
+
+## Mục tiêu
+
+Hardening audit, idempotency và workflow persistence để mọi hành động có thể truy vết và workflow có thể khôi phục sau restart. Foundation và contract đã hoàn tất ở Phase 4.
+
+## Công việc
+
+### 5.1. Audit trail hardening
+
+- Mask PII trước khi lưu theo retention/deletion policy và yêu cầu Nghị định 13/2023/NĐ-CP.
+- Append-only storage.
+- Hoàn thiện `prev_hash`/`record_hash` hash chain và tamper verification.
+- Query audit theo `workflow_id`, `tenant_id`, `actor_id`.
+- Phân quyền người xem audit và break-glass access có audit.
+- Business audit atomic với mutation; telemetry/metrics có thể eventual consistency.
+
+### 5.2. Idempotency lifecycle hardening
+
+- `IN_PROGRESS`, `COMPLETED`, `FAILED`.
+- Quy tắc xử lý `IN_PROGRESS` khi worker chết hoặc lease hết hạn; không xóa record chưa xác định kết quả.
+- TTL và cleanup an toàn chỉ với record đã xác định kết quả.
+- Conflict nếu cùng key nhưng request hash khác.
+- Lock/concurrency control cho request đồng thời.
+
+### 5.3. Workflow persistence và recovery
+
+- Lưu state/checkpoint không chỉ trong memory.
+- Resume từ `WAITING_FOR_APPROVAL`.
+- Persist step result và failure reason.
+- Không mất workflow sau process restart; có restart recovery test.
+- Có correlation giữa workflow, approval, tool action và audit event.
+- Checkpoint versioning và migration backward compatibility.
+
+## Deliverables
+
+- Audit schema/service hardening với hash chain.
+- Idempotency lifecycle implementation.
+- Persistent workflow state.
+- Recovery tests.
+
+## Gate kiểm tra
+
+- Restart giữa workflow không làm mất state.
+- `IN_PROGRESS` stale được recovery an toàn; record chưa xác định kết quả không bị cleanup.
+- Audit đầy đủ trước/sau mỗi mutation; business audit atomic với mutation.
+- PII không xuất hiện trong audit ngoài trường được phép và retention/deletion được thực thi.
+- Tamper test phát hiện record bị sửa.
+
+---
+
+# Phase 6 — Agent implementation và LLM gateway
+
+## Mục tiêu
+
+Đưa LLM vào vai trò có kiểm soát, không để LLM trở thành security boundary hoặc business engine. Workflow persistence từ Phase 5 là prerequisite của orchestration, không phải công việc phát sinh sau khi graph đã chạy.
+
+## Công việc
+
+### 6.1. LLM gateway
+
+- Provider abstraction.
+- Model routing theo task.
+- Timeout, retry, circuit breaker.
+- Token budget.
+- Cost accounting.
+- Structured output enforcement.
+- Redaction trước khi gửi prompt.
+- Provider fallback chỉ khi contract tương thích.
+
+### 6.2. Agent theo thứ tự
+
+1. **Data Agent**
+   - Chỉ read.
+   - Output có metric, period, currency, source và confidence/evidence.
+2. **Supply Chain Agent**
+   - Check stock trước write.
+   - Không tự thực thi high-risk.
+   - Trả đề xuất và action payload chuẩn hóa.
+3. **Executive Agent**
+    - Chỉ planner/delegate/aggregate/report.
+    - Không gọi business tool.
+    - Agent list tĩnh.
+
+Customer Support Agent, Returns, Shipments và Fulfillment là post-MVP Phase 11; các contract/gate liên quan chỉ giữ để bảo vệ regression và không thuộc deliverable Phase 6.
+
+
+### 6.3. Prompt và data isolation
+
+- System prompt version hóa.
+- Tool description không chứa quyền ngoài backend.
+- Tool result bọc trong structured data envelope.
+- Database text và user text được xem là data, không phải instruction.
+- Giới hạn context và loại bỏ dữ liệu không cần thiết.
+- Không đưa secrets hoặc raw PII vào prompt.
+
+### 6.4. Agent contracts
+
+Mỗi Agent phải có:
+
+- Input schema.
+- Output schema.
+- Tool allowlist.
+- Max calls, iterations, wall time, token budget.
+- Escalation target.
+- Error contract.
+- Confidence/evidence policy.
+
+## Deliverables
+
+- Ba Agent MVP chạy độc lập: Data, Supply Chain và Executive.
+- Prompt version registry.
+- LLM gateway.
+- Structured outputs.
+- Agent unit/evaluation tests.
+
+## Gate kiểm tra
+
+- Output luôn parse được hoặc chuyển sang failure an toàn.
+- Agent không gọi Tool ngoài allowlist kể cả khi prompt injection.
+- Agent không quyết định identity/scope.
+- Thay model không phá output contract.
+
+---
+
+# Phase 7 — LangGraph orchestration, Validator và HITL
+
+## Mục tiêu
+
+Kết nối Agent thành workflow durable, có nhánh thành công, lỗi, retry, approval và partial completion.
+
+## Công việc
+
+### 7.1. Graph state
+
+Tối thiểu gồm:
+
+- `workflow_id`, `tenant_id`, `actor_context_ref`.
+- User intent đã chuẩn hóa.
+- Plan version.
+- Agent tasks và task status.
+- Intermediate results.
+- Validation findings.
+- Risk decisions.
+- Approval references.
+- Retry counters.
+- Final report.
+
+Không lưu raw secret hoặc PII không cần thiết trong state.
+
+### 7.2. Nodes
+
+- `ingress_node`.
+- `identity_node`.
+- `planner_node`.
+- `delegate_node`.
+- `data_agent_node`.
+- `supply_agent_node`.
+- `validator_node`.
+- `risk_node`.
+- `approval_gate_node`.
+- `execute_node`.
+- `aggregate_node`.
+- `report_node`.
+- `failure_handler_node`.
+
+### 7.3. Validator
+
+Kiểm tra:
+
+- Completeness.
+- Schema.
+- Consistency giữa Data và Supply.
+- Policy/risk violations.
+- Evidence/source/time range.
+
+Kết quả: `PASS`, `WARN`, `NEED_REVIEW`, `FAIL`.
+
+### 7.4. HITL
+
+- Tạo `ApprovalRequest` với payload immutable/hash.
+- Chỉ role phù hợp mới xem/duyệt.
+- Hỗ trợ approve, reject, expire, cancel.
+- Khi approve phải kiểm tra payload hash, policy hiện tại và resource state lại lần cuối.
+- Duyệt không đồng nghĩa execute nếu resource đã thay đổi.
+- Có timeout, reminder và escalation.
+
+### 7.5. Failure handling
+
+- Retry chỉ cho transient failure.
+- Backoff có jitter.
+- Circuit breaker cho provider ngoài.
+- `PARTIALLY_COMPLETED` khi một nhánh thành công và một nhánh lỗi.
+- Không tự retry action write không xác định trạng thái.
+- Escalate khi không thể đảm bảo trạng thái.
+
+## Deliverables
+
+- LangGraph workflow durable.
+- Validator và risk nodes.
+- Approval lifecycle.
+- Failure/retry paths.
+- End-to-end workflow tests.
+
+## Gate kiểm tra
+
+- Chạy được workflow đọc hoàn chỉnh.
+- High-risk action dừng đúng tại approval.
+- Restart sau pause vẫn resume đúng.
+- Validator bắt được mâu thuẫn giả lập.
+- Một nhánh lỗi không làm mất kết quả nhánh còn lại.
+
+---
+
+# Phase 8 — UI, API và execution trace
+
+## Mục tiêu
+
+Cung cấp giao diện sử dụng và vận hành mà không làm lộ prompt, secret hoặc PII.
+
+## Công việc
+
+### 8.1. API
+
+- Endpoint tạo workflow.
+- Endpoint lấy trạng thái workflow.
+- Endpoint lấy report.
+- Endpoint approval theo quyền.
+- Endpoint audit theo scope.
+- Streaming events nếu cần.
+- Rate limit, request size limit, pagination/export limit và API versioning.
+
+### 8.2. Operator/Executive UI
+
+- Dashboard metric.
+- Workflow list và trạng thái.
+- Approval queue.
+- Audit timeline.
+- Error/partial completion details.
+- Kill switch/disable write nếu role được phép.
+
+Customer UI và Customer Support Agent là post-MVP Phase 11; không thuộc deliverable MVP.
+
+### 8.3. Report và chi tiết workflow
+
+- Report MVP hiển thị doanh thu, AOV, sản phẩm bán chạy và tồn kho thấp, kèm kỳ báo cáo, tiền tệ và nguồn dữ liệu.
+- Chi tiết workflow liên kết report với đề xuất, approval, kết quả thực thi và audit theo `workflow_id`.
+- Thông tin hiển thị phải tuân theo scope của actor; dữ liệu đầu vào/đầu ra được redact theo chính sách PII.
+
+### 8.4. Trace viewer
+
+Hiển thị:
+
+- User request đã redact.
+- Agent/tool step.
+- Duration và status.
+- Validator findings.
+- Approval event.
+- Final report.
+
+## Gate kiểm tra
+
+- UI tôn trọng scope backend; không dựa vào ẩn nút để bảo mật.
+- Người dùng không thể sửa payload bằng cách thay request frontend.
+- Audit và approval hiển thị đúng tenant/role.
+- PII được mask ở UI không có quyền xem.
+
+---
+
+# Phase 9 — Observability, evaluation, security hardening và production readiness
+
+## Mục tiêu
+
+Hoàn thiện chaos, baseline và regression toàn hệ thống trên nền observability, evaluation và security suites đã được thiết lập từ Phase 1–3; đo được chất lượng, an toàn, hiệu năng và chi phí trước khi có người dùng thật.
+
+## Công việc
+
+### 9.1. Observability
+
+- Structured log với `workflow_id`, `step_id`, `agent_id`, `tool_name`, `status`, `duration_ms`.
+- Metrics p50/p95/p99 latency.
+- Tool call count, retry count, failure rate.
+- Token usage và cost per workflow.
+- Approval queue age và SLA.
+- Alert cho unauthorized spike, provider failure, cost anomaly, PII incident.
+- Distributed tracing.
+- Queue visibility timeout, dead-letter queue (DLQ) và job deduplication.
+
+### 9.2. Evaluation suite
+
+- Golden set câu hỏi và expected outcomes.
+- Tool-call correctness.
+- Metric correctness.
+- Validator correctness.
+- Prompt injection suite.
+- Permission matrix suite.
+- Cross-tenant/cross-customer suite.
+- Regression suite sau mỗi model/prompt/tool change.
+
+### 9.3. Chaos và failure testing
+
+- LLM timeout.
+- Invalid JSON.
+- Database transient failure.
+- Queue restart.
+- Tool commit rồi response timeout.
+- Approval hết hạn.
+- Resource thay đổi sau approval.
+- Một Agent trả thiếu dữ liệu.
+- Hai Agent trả dữ liệu mâu thuẫn.
+
+### 9.4. Security testing
+
+- SAST/dependency scan.
+- Secret scan.
+- API auth tests.
+- IDOR tests.
+- Rate-limit tests.
+- Prompt injection tests.
+- PII redaction tests.
+- Audit tamper tests.
+- Backup/restore drill và RPO/RTO verification.
+- Migration backward-compatibility tests.
+- Key/token rotation và revocation tests.
+- Rate-limit, request-size, pagination/export-limit và API-version tests.
+- Break-glass admin access có audit.
+- Retention/deletion tests cho workflow, audit và PII.
+- Kill-switch drill và external-side-effect compensating/reconciliation procedure.
+
+## Gate kiểm tra
+
+- CI chạy toàn bộ regression/security suite đã có từ Phase 1–3 và suite hardening Phase 9.
+- Unauthorized execution = 0.
+- Cross-tenant/cross-customer leakage = 0.
+- Duplicate write = 0 trong retry/concurrency suite.
+- Read workflow p95 ≤ 5 giây; write workflow p95 ≤ 60 giây, không tính thời gian chờ approval.
+- 100% blocking authorization/injection/security cases pass.
+- Golden set, tool-call accuracy, validator correctness và cost/workflow đạt acceptance thresholds trong registry.
+- Recovery sau restart và approval replay pass 100% test cases.
+- Có baseline latency/cost và cảnh báo hoạt động.
+- Có báo cáo đánh giá trước rollout.
+
+---
+
+# Phase 10 — Staging, rollout và vận hành production
+
+## Mục tiêu
+
+Đưa hệ thống vào vận hành theo mức độ rủi ro tăng dần, có rollback và kill switch.
+
+## Công việc
+
+### 10.1. Staging parity
+
+- Cấu hình staging gần production.
+- Seed data không chứa PII thật hoặc đã được anonymize.
+- Test tích hợp với hệ thống thật ở chế độ read-only nếu có thể.
+- Chạy load test với giới hạn cost.
+
+### 10.2. Shadow Mode
+
+- Agent đọc và đưa ra đề xuất.
+- Không có write action.
+- So sánh với kết quả vận hành thật.
+- Ghi accuracy, latency, cost và false positive.
+
+### 10.3. Assist Mode
+
+- Agent đề xuất.
+- Nhân sự xác nhận mọi action.
+- Theo dõi acceptance/rejection và lỗi nghiệp vụ.
+- Chưa cho phép high-risk tự động.
+
+### 10.4. Limited Automation
+
+- Chỉ tự động LOW và MEDIUM trong ngưỡng đã kiểm chứng.
+- HIGH/CRITICAL luôn qua approval.
+- Feature flag theo tenant hoặc nhóm người dùng.
+- Có kill switch write toàn hệ thống.
+
+### 10.5. Production operation
+
+- On-call ownership.
+- Runbook xử lý incident.
+- Backup/restore drill, RPO/RTO và migration backward compatibility/rollback.
+- Key/token rotation và revocation.
+- Model/prompt/tool change approval.
+- Queue visibility timeout, DLQ và job deduplication.
+- Rate limit, request size limit, pagination/export limit và API versioning.
+- Break-glass admin access có audit.
+- Retention/deletion policy cho workflow, audit và PII theo Nghị định 13/2023/NĐ-CP.
+- Kill-switch drill và quy trình compensating/reconciliation cho external side effect.
+- Định kỳ review audit, cost, access và policy.
+
+## Gate rollout
+
+Chỉ chuyển giai đoạn khi:
+
+- Không có incident nghiêm trọng trong giai đoạn quan sát.
+- Golden set đạt ngưỡng đã chốt.
+- Không có authorization bypass hoặc data leakage.
+- Cost nằm trong ngân sách.
+- Runbook và rollback đã được diễn tập.
+
+---
+
+# Phase 11 — Customer Support, Returns và mở rộng sau MVP
+
+## Mục tiêu
+
+Mở rộng nghiệp vụ sau khi nền tảng dữ liệu, phân quyền, audit và workflow đã ổn định.
+
+## Công việc
+
+### Customer Support
+
+- `get_my_order` với customer scope bắt buộc.
+- Shipping status qua integration chính thức.
+- Create ticket với chống spam/rate limit.
+- Handoff sang human hoặc Supply Chain.
+
+### Returns
+
+- Kiểm tra eligibility theo thời hạn và trạng thái đơn.
+- Tạo return request idempotent.
+- Không tự hoàn tiền nếu chưa có policy và approval phù hợp.
+- Audit toàn bộ quá trình.
+
+### Shipping/Fulfillment
+
+- Contract với carrier/provider.
+- Retry/circuit breaker.
+- Mapping trạng thái ngoài vào trạng thái nội bộ.
+- Xử lý webhook duplicate/out-of-order.
+
+## Gate mở rộng
+
+- Không mở feature nếu chưa có permission tests, failure tests, audit và rollback.
+- Mỗi domain mới phải có Service, Tool contract, policy, risk classification và evaluation cases riêng.
+
+---
+
+# Ma trận deliverables tổng hợp
+
+| Phase | Kết quả bắt buộc | Điều kiện chặn chuyển phase |
+|---|---|---|
+| 0 | ADR-001–004, scope, source of truth, integration contracts, RPO/RTO, acceptance-threshold registry | Chưa chốt actor/tenant/source of truth/failure semantics/reconciliation thì dừng; không mở inventory write |
+| 1 | Repo, CI, config, health checks, structured logging, correlation IDs, scan và cost interface | Không chạy reproducible hoặc scan/test harness không pass thì dừng |
+| 2 | Schema MVP, migrations, repositories, hai tầng RLS và context isolation | Có cross-scope access hoặc tenant context reuse thì dừng |
+| 3 | Auth, permission matrix, policy, deterministic risk registry và security suite | Có unauthorized path hoặc risk version không được audit thì dừng |
+| 4 | Services, Tools, transaction, idempotency foundation, concurrency và audit event contract | Duplicate/concurrent write hoặc audit không atomic thì dừng |
+| 5 | Audit/idempotency hardening, hash chain, lifecycle recovery, workflow persistence và checkpoint | Không resume, stale `IN_PROGRESS`, TTL safety hoặc tamper detect được thì dừng |
+| 6 | LLM gateway và 3 Agent MVP contracts (Data, Supply Chain, Executive) | Output/allowlist không ổn định thì dừng |
+| 7 | Graph, validator, HITL, failure paths trên workflow persistence | Không xử lý approval/partial failure/restart thì dừng |
+| 8 | Operator API/UI, report, trace, approval screen, limits/versioning | UI bypass backend scope hoặc giới hạn API không enforce thì dừng |
+| 9 | Eval/security/observability hardening, chaos, baseline, DLQ, backup/restore và acceptance gates | Leakage/unauthorized/threshold/recovery/ops gate không đạt thì dừng |
+| 10 | Staging, shadow, assist, rollout, rotation, retention, kill-switch drill | Không rollback/kill switch/RPO-RTO/runbook thì dừng |
+| 11 | Support, returns, shipping/fulfillment post-MVP | Domain mới thiếu full controls thì dừng |
+
+Trước khi khởi động mỗi phase, ghi owner, người nghiệm thu, effort, ngày mục tiêu và trạng thái cho từng deliverable trong issue tracker. Chốt ngày và effort sau khi dependency cùng acceptance criteria đã rõ; không dùng các trường này như cam kết khi chưa được ước lượng.
+
+---
+
+# Bộ test tối thiểu trước MVP production
+
+## Authorization và data isolation
+
+- Customer A không đọc được Order của Customer B.
+- Actor tenant A không đọc/ghi dữ liệu tenant B.
+- Customer Support không gọi `update_stock`.
+- Data Agent không gọi write tool.
+- Executive không gọi business tool trực tiếp.
+- Supply Agent không thao tác warehouse ngoài scope.
+
+## Transaction và idempotency
+
+- Retry cùng key và cùng payload trả snapshot, không double-apply.
+- Cùng key nhưng payload khác bị conflict.
+- Hai request đồng thời cùng key chỉ một request execute.
+- Commit thành công nhưng response timeout không gây ghi lần hai.
+- `IN_PROGRESS` khi worker chết/lease hết hạn được xử lý an toàn; không cleanup record chưa rõ kết quả.
+- TTL cleanup chỉ xóa record đã xác định kết quả.
+- Transaction rollback khi business rule thất bại.
+- Concurrent inventory update không làm sai balance.
+- Audit business atomic với mutation; telemetry có thể eventual consistency.
+
+## LLM và prompt injection
+
+- LLM không thể tự đổi role/scope.
+- Text trong tên sản phẩm không được biến thành instruction.
+- Tool output độc hại không kích hoạt tool ngoài plan.
+- Structured output sai schema chuyển sang failure an toàn.
+- Vượt token/iteration/time budget bị dừng.
+
+## Workflow và approval
+
+- High-risk action dừng ở approval.
+- Rejected/expired approval không execute.
+- Payload sửa sau approval bị từ chối.
+- Resource thay đổi sau approval được kiểm tra lại.
+- Restart sau `WAITING_FOR_APPROVAL` resume đúng.
+- Một nhánh lỗi tạo `PARTIALLY_COMPLETED` đúng.
+
+## Privacy và operations
+
+- Log/audit/UI không lộ PII ngoài quyền.
+- Secret scan và dependency scan không phát hiện vấn đề chặn release.
+- Kill switch chặn mọi write action.
+- LLM outage chuyển sang fallback an toàn.
+- Queue visibility timeout, DLQ và job deduplication hoạt động đúng.
+- Backup/restore drill đạt RPO/RTO; migration backward compatibility pass.
+- Key/token rotation và revocation pass.
+- Retention/deletion workflow, audit và PII pass.
+- External side effect có compensating/reconciliation procedure.
+- Alert được kích hoạt khi error/cost/queue bất thường.
+
+---
+
+# Checklist bắt đầu triển khai ngay
+
+1. Chốt source of truth, integration boundary, external failure semantics và reconciliation strategy; chưa chốt chỉ mock/read-only.
+2. Viết `ADR-001`–`ADR-004`, contract/API/webhook, sequence diagram read/write, RPO/RTO và acceptance-threshold registry.
+3. Tạo repository skeleton, CI, structured logging/correlation IDs, secret/dependency scan, test harness và cost accounting interface.
+4. Thiết kế schema MVP: `tenants` (nếu có), `actors/users`, `products`, `warehouses`, `inventory`, `orders`, `order_items`, `inventory_movements`, `idempotency_keys`, `audit_events`, `workflow_runs`.
+5. Thiết kế `RequestContext`, application/DB RLS, permission matrix và worker/pool context isolation.
+6. Viết test cross-tenant/cross-customer và security gates trước khi viết Agent.
+7. Xây deterministic `InventoryService`/`AnalyticsService` và risk-threshold registry có version.
+8. Hoàn tất idempotency foundation, concurrency primitive và audit event contract atomic trước khi mở write Tool.
+9. Đăng ký Tool schemas và kiểm tra allowlist.
+10. Chạy Data Agent read-only; sau đó Supply Chain Assist Mode.
+11. Hoàn tất workflow persistence hardening, recovery/hash chain/TTL và test approval replay.
+12. Chỉ mở Supply Chain write flow sau khi Shadow/Assist, source-of-truth gate và toàn bộ acceptance gates pass.
+
+**Nguyên tắc khởi động:** bắt đầu từ identity, data isolation và deterministic services; không bắt đầu từ prompt hoặc UI. 
