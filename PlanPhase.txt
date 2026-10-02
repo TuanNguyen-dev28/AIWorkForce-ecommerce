@@ -2,9 +2,9 @@
 
 **Dự án:** AI Workforce cho E-commerce B2C  
 **Mục tiêu:** Xây dựng hệ thống production-ready, trong đó LLM chỉ lập kế hoạch/điều phối; mọi quyền hạn, business rule, transaction và thao tác ghi do backend xác định kiểm soát.  
-**Tài liệu kiến trúc tham chiếu:** [`KẾ HOẠCH TRIỂN KHAI ĐỒ ÁN AI WORKFO.md`](KẾ HOẠCH%20TRIỂN%20KHAI%20ĐỒ%20ÁN%20AI%20WORKFO.md)
+**Tài liệu kiến trúc tham chiếu:** [`KẾ HOẠCH TRIỂN KHAI ĐỒ ÁN AI WORKFO.txt`](KẾ%20HOẠCH%20TRIỂN%20KHAI%20ĐỒ%20ÁN%20AI%20WORKFO.txt)
 
-**Vai trò và thứ tự ưu tiên:** tài liệu kiến trúc mô tả nguyên tắc và kiến trúc đích; file `PlanPhase.md` là nguồn chuẩn về phạm vi MVP, thứ tự phase và gate triển khai. Nếu hai tài liệu khác nhau, cập nhật tài liệu kiến trúc để khớp với phạm vi và thứ tự trong file này.
+**Vai trò và thứ tự ưu tiên:** tài liệu kiến trúc mô tả nguyên tắc và kiến trúc đích; file `PlanPhase.txt` là nguồn chuẩn về phạm vi MVP, thứ tự phase và gate triển khai. Nếu hai tài liệu khác nhau, cập nhật tài liệu kiến trúc để khớp với phạm vi và thứ tự trong file này.
 
 ---
 
@@ -71,13 +71,23 @@ Các giai đoạn cũ gom nhiều loại công việc; bảng dưới đây đ�
 | Lộ trình cũ trong tài liệu kiến trúc | Phase chuẩn trong file này | Ghi chú |
 |---|---|---|
 | Giai đoạn 0 — Nền tảng và tiêu chí thành công | Phase 0–1 | Chốt quyết định và dựng môi trường phát triển. |
-| Giai đoạn 1 — Dữ liệu và bảo mật | Phase 2–5 | Tách schema/RLS, authorization, service, idempotency và audit thành các gate rõ ràng. |
+| Giai đoạn 1 — Dữ liệu và bảo mật | Phase 2–5 | Tách schema/data isolation, authorization, service, idempotency và audit thành các gate rõ ràng. |
 | Giai đoạn 2 — Service, Policy và Authorization | Phase 3–5 | Các phần policy, service và write safety được triển khai theo dependency. |
 | Giai đoạn 3 — Agent và Tool Binding | Phase 6 | Chỉ gồm ba Agent MVP: Data, Supply Chain và Executive Planner. |
 | Giai đoạn 4 — Điều phối và trạng thái | Phase 7 | LangGraph, Validator, approval và phục hồi workflow. |
 | Giai đoạn 5 — Giao diện và Execution Trace | Phase 8 | Operator/Executive UI, report, approval và trace; customer chat là post-MVP. |
 | Giai đoạn 6 — Đánh giá và vận hành | Phase 9–10 | Hardening, staging, shadow/assist và rollout. |
 | Mở rộng nghiệp vụ sau MVP | Phase 11 | Customer Support, Returns, Shipments và Fulfillment. |
+
+### 0.6. Quyết định MySQL và phạm vi đợt xây nền dữ liệu
+
+- Dùng MySQL cho database local `aiworkforce_ecommerce`, quản lý bằng MySQL Workbench; môi trường đã phát hiện MySQL 8.0.46 và Workbench 8.0. SQL yêu cầu MySQL 8.0.16 trở lên để CHECK constraints được thực thi. Quyết định và giới hạn được ghi tại [ADR-003](docs/decisions/ADR-003-mysql.md).
+- Schema khởi đầu có tenant, actor thuộc tenant và định danh từ identity provider bên ngoài. Mỗi product biểu diễn một SKU; tồn kho dùng số nguyên, không backorder, `0 <= reserved <= on_hand`. Tiền dùng DECIMAL và mã tiền tệ; timestamp lưu UTC.
+- Dữ liệu khởi đầu chỉ là mock. Chưa chốt nguồn dữ liệu thật, quyền ghi lên hệ thống ngoài, failure semantics hoặc reconciliation; các gate này vẫn mở.
+- Đưa `approval_requests` vào schema để chuẩn bị luồng approval trong MVP. Cấu trúc bảng chưa triển khai authentication, phân quyền người duyệt hoặc workflow thực thi.
+- Phạm vi đợt này là migrations, guards/views, demo seed, SQL kiểm tra và bootstrap dùng trong Workbench. Xem [hướng dẫn MySQL](database/mysql/README.md). Chạy `001_initial_schema.sql`, sau đó `002_guards_and_views.sql` trong `database/mysql/migrations`; seed nằm ở `database/mysql/seeds/001_demo.sql`, bootstrap ở `database/mysql/bootstrap.sql`.
+- Repository, RequestContext/authentication, policy runtime, service concurrency/idempotency, checkpoint adapter và hash-chain verification chưa được bàn giao trong đợt nền dữ liệu. Các bảng, constraints và SQL kiểm tra không đồng nghĩa Phase 0–5 đã hoàn tất hoặc ứng dụng đã có tenant/customer isolation.
+- MySQL không có native row-level policy tương đương PostgreSQL. Composite tenant foreign keys bảo vệ liên kết dữ liệu; quyền đọc theo tenant vẫn phải được kiểm soát tại ứng dụng. Nếu dùng chung DB account có quyền SELECT trên base tables, database chưa ngăn được đọc chéo tenant; phải giải quyết gate cách ly đọc production trước khi mở dữ liệu thật.
 
 ---
 
@@ -110,7 +120,7 @@ Loại bỏ các giả định chưa được kiểm chứng trước khi thiế
 
 - Python và runtime version.
 - LangGraph version.
-- Database transactional chính.
+- Database transactional chính: MySQL theo [ADR-003](docs/decisions/ADR-003-mysql.md); InnoDB, utf8mb4, database local `aiworkforce_ecommerce`.
 - Redis/cache nếu cần.
 - Queue/background worker nếu workflow có thời gian chờ.
 - LLM provider và model fallback.
@@ -132,7 +142,7 @@ Loại bỏ các giả định chưa được kiểm chứng trước khi thiế
 
 - `ADR-001` về ranh giới LLM/deterministic core.
 - `ADR-002` về nguồn dữ liệu và source of truth.
-- `ADR-003` về Database, queue và LLM provider.
+- [ADR-003](docs/decisions/ADR-003-mysql.md) chốt MySQL và giới hạn nền dữ liệu; queue và LLM provider còn cần quyết định riêng.
 - `ADR-004` về integration boundary và source-of-truth policy.
 - Contract/API/webhook và sequence diagram read/write của hệ thống ngoài.
 - Chính sách stale data, reconciliation, duplicate/out-of-order webhook và manual reconciliation.
@@ -201,8 +211,8 @@ Xây nền dữ liệu có transaction, isolation và auditability trước khi 
 
 Triển khai trước:
 
-- `tenants` nếu multi-tenant.
-- `users`/`actors`.
+- `tenants` để đặt ranh giới dữ liệu ngay từ schema khởi đầu.
+- `actors` thuộc tenant, tham chiếu định danh bên ngoài.
 - `products`.
 - `warehouses`.
 - `inventory`.
@@ -218,13 +228,14 @@ Bảng kiểm soát bắt buộc:
 - `audit_events`.
 - `workflow_runs` và checkpoint nếu cần persistence riêng cho LangGraph.
 
-`approval_requests` chỉ được thêm khi approval flow được mở trong MVP; các bảng support/returns/shipments không thuộc schema MVP.
+`approval_requests` được thêm về mặt cấu trúc để chuẩn bị approval flow trong MVP. Luồng duyệt và quyền thực thi được xây ở các phase sau; bảng này không tự mở quyền write. Các bảng support/returns/shipments không thuộc schema MVP.
 
 ### 2.2. Ràng buộc dữ liệu
 
-- Foreign keys và unique constraints.
-- Index theo `tenant_id`, `customer_id`, `order_id`, `product_id`, `warehouse_id`.
-- Check constraint cho số lượng, giá trị và trạng thái.
+- Foreign keys và unique constraints; liên kết giữa các bảng thuộc tenant dùng composite FK chứa `tenant_id` để chặn liên kết chéo tenant.
+- Index theo `tenant_id`, `order_id`, `product_id`, `warehouse_id`; index customer scope được bổ sung khi mở domain customer ở Phase 11.
+- CHECK constraints cho số lượng, giá trị và trạng thái trên MySQL 8.0.16+; SKU dùng số nguyên, không backorder, reserved không vượt on_hand theo giả định ban đầu.
+- Tiền dùng DECIMAL và currency; các quy tắc tổng hợp nhiều dòng, source of truth và chuyển trạng thái cần Service xử lý.
 - Timestamps UTC.
 - Soft delete chỉ khi nghiệp vụ cho phép.
 - Migration có version và rollback strategy.
@@ -237,15 +248,15 @@ Bảng kiểm soát bắt buộc:
 - Tách read repository và write repository nếu giúp kiểm soát quyền.
 - Chuẩn hóa lỗi: not found, conflict, constraint violation, transient DB failure.
 
-### 2.4. Row-Level Security
+### 2.4. Cách ly dữ liệu và giới hạn của MySQL
 
-- Thiết kế policy theo `tenant_id`.
-- Với customer-facing request, buộc `customer_id` từ authenticated context.
-- Không nhận `tenant_id/customer_id/actor_id` do LLM sinh làm nguồn sự thật.
-- Tách hai tầng RLS: application layer kiểm tra scope trước query và database layer enforce policy bằng connection context.
-- Đặc tả application role, migration role, connection-pool context và background worker context.
-- Context tenant không được reuse sai giữa request; worker phải set/reset context tường minh.
-- Viết test cross-tenant, cross-customer và tenant-context không bị reuse.
+- Application layer bắt buộc lấy `tenant_id` từ RequestContext đã xác thực và áp scope cho mọi query; không nhận `tenant_id/customer_id/actor_id` do LLM sinh làm nguồn sự thật.
+- Database layer dùng composite tenant FK để ngăn tham chiếu chéo tenant, unique constraints và least privilege. Những ràng buộc này không lọc kết quả SELECT theo người dùng.
+- MySQL không có native row-level policy. Session variable như `@tenant_id` không tự tạo hàng rào bảo mật; shared DB account có SELECT trên base tables vẫn có khả năng đọc mọi tenant.
+- Gate production còn mở: chọn và kiểm chứng cách ly đọc ở database, ví dụ tách database/account theo tenant hoặc thiết kế routine/view có ranh giới danh tính được kiểm chứng và không cấp quyền base-table trực tiếp. Chưa coi application filtering hoặc composite FK là hoàn thành gate này.
+- Đặc tả application role, migration role, connection-pool context và background worker context. Context tenant không được reuse sai giữa request; worker phải set/reset context tường minh.
+- Viết test cross-tenant và tenant-context không bị reuse khi triển khai Repository/RequestContext. Các phần này chưa được cung cấp bởi schema/seed/view.
+- Customer-facing request và test cross-customer chỉ mở ở Phase 11: `customer_id` phải lấy từ authenticated context. Đợt schema hiện tại chưa triển khai customer-facing authorization.
 
 ## Deliverables
 
@@ -254,14 +265,15 @@ Bảng kiểm soát bắt buộc:
 - Repository interfaces và implementation.
 - Test isolation dữ liệu.
 - Test transaction rollback.
-- RLS policy cho application/DB/worker context và test không reuse sai tenant context.
+- Policy scope tại application/worker, composite tenant FK, least privilege và test không reuse sai tenant context; quyết định cùng bằng chứng cách ly đọc database cho production.
 
 ## Gate kiểm tra
 
 - Database trống có thể migrate lên đầy đủ bằng một lệnh chuẩn.
-- User A không thể đọc dữ liệu của User B.
+- Actor tenant A không thể đọc dữ liệu tenant B qua Repository/API; quyền đọc giữa các actor trong cùng tenant phải tuân permission matrix.
 - Không có repository method bỏ qua scope.
 - Tồn kho không thể âm nếu policy hiện tại cấm.
+- Chưa kết thúc gate cách ly đọc production khi shared DB account vẫn có thể SELECT base tables của mọi tenant.
 
 ---
 
@@ -860,7 +872,7 @@ Mở rộng nghiệp vụ sau khi nền tảng dữ liệu, phân quyền, audit
 |---|---|---|
 | 0 | ADR-001–004, scope, source of truth, integration contracts, RPO/RTO, acceptance-threshold registry | Chưa chốt actor/tenant/source of truth/failure semantics/reconciliation thì dừng; không mở inventory write |
 | 1 | Repo, CI, config, health checks, structured logging, correlation IDs, scan và cost interface | Không chạy reproducible hoặc scan/test harness không pass thì dừng |
-| 2 | Schema MVP, migrations, repositories, hai tầng RLS và context isolation | Có cross-scope access hoặc tenant context reuse thì dừng |
+| 2 | Schema MVP, migrations, repositories, application scope, composite tenant FK, least privilege và context isolation | Có cross-scope access, tenant context reuse hoặc chưa chốt cách ly đọc DB production thì dừng |
 | 3 | Auth, permission matrix, policy, deterministic risk registry và security suite | Có unauthorized path hoặc risk version không được audit thì dừng |
 | 4 | Services, Tools, transaction, idempotency foundation, concurrency và audit event contract | Duplicate/concurrent write hoặc audit không atomic thì dừng |
 | 5 | Audit/idempotency hardening, hash chain, lifecycle recovery, workflow persistence và checkpoint | Không resume, stale `IN_PROGRESS`, TTL safety hoặc tamper detect được thì dừng |
@@ -879,9 +891,9 @@ Trước khi khởi động mỗi phase, ghi owner, người nghiệm thu, effor
 
 ## Authorization và data isolation
 
-- Customer A không đọc được Order của Customer B.
+- Customer A không đọc được Order của Customer B (gate Phase 11 khi mở customer-facing flow).
 - Actor tenant A không đọc/ghi dữ liệu tenant B.
-- Customer Support không gọi `update_stock`.
+- Customer Support không gọi `update_stock` (gate Phase 11 khi mở Customer Support).
 - Data Agent không gọi write tool.
 - Executive không gọi business tool trực tiếp.
 - Supply Agent không thao tác warehouse ngoài scope.
@@ -935,9 +947,9 @@ Trước khi khởi động mỗi phase, ghi owner, người nghiệm thu, effor
 1. Chốt source of truth, integration boundary, external failure semantics và reconciliation strategy; chưa chốt chỉ mock/read-only.
 2. Viết `ADR-001`–`ADR-004`, contract/API/webhook, sequence diagram read/write, RPO/RTO và acceptance-threshold registry.
 3. Tạo repository skeleton, CI, structured logging/correlation IDs, secret/dependency scan, test harness và cost accounting interface.
-4. Thiết kế schema MVP: `tenants` (nếu có), `actors/users`, `products`, `warehouses`, `inventory`, `orders`, `order_items`, `inventory_movements`, `idempotency_keys`, `audit_events`, `workflow_runs`.
-5. Thiết kế `RequestContext`, application/DB RLS, permission matrix và worker/pool context isolation.
-6. Viết test cross-tenant/cross-customer và security gates trước khi viết Agent.
+4. Thiết kế schema MVP MySQL: `tenants`, `actors`, `products`, `warehouses`, `inventory`, `orders`, `order_items`, `inventory_movements`, `idempotency_keys`, `audit_events`, `workflow_runs`, `approval_requests`.
+5. Thiết kế `RequestContext`, application scope, composite tenant FK, least privilege, permission matrix và worker/pool context isolation; chốt giải pháp cách ly đọc database trước production.
+6. Viết test cross-tenant và security gates trước khi viết Agent MVP; bổ sung cross-customer trước khi mở Phase 11.
 7. Xây deterministic `InventoryService`/`AnalyticsService` và risk-threshold registry có version.
 8. Hoàn tất idempotency foundation, concurrency primitive và audit event contract atomic trước khi mở write Tool.
 9. Đăng ký Tool schemas và kiểm tra allowlist.

@@ -2,7 +2,9 @@ KẾ HOẠCH TRIỂN KHAI ĐỒ ÁN: AI WORKFORCE CHO E-COMMERCE B2C
 
 (Phiên bản Production Architecture v1.0 — Hướng tới triển khai thực tế)
 
-**Vai trò tài liệu:** đây là tài liệu kiến trúc tham chiếu. Phạm vi MVP, thứ tự phase và gate thực thi chuẩn được quản lý trong [`PlanPhase.md`](PlanPhase.md). Khi thay đổi phạm vi hoặc lộ trình, cập nhật hai tài liệu cùng nhau và giữ PlanPhase làm nguồn chuẩn về thứ tự triển khai.
+**Vai trò tài liệu:** đây là tài liệu kiến trúc tham chiếu. Phạm vi MVP, thứ tự phase và gate thực thi chuẩn được quản lý trong [`PlanPhase.txt`](PlanPhase.txt). Khi thay đổi phạm vi hoặc lộ trình, cập nhật hai tài liệu cùng nhau và giữ PlanPhase làm nguồn chuẩn về thứ tự triển khai.
+
+**Quyết định nền dữ liệu:** dùng MySQL cho database local `aiworkforce_ecommerce`, quản lý bằng MySQL Workbench. Môi trường đã phát hiện MySQL 8.0.46 và Workbench 8.0; SQL yêu cầu MySQL 8.0.16+ để thực thi CHECK constraints. Xem [ADR-003](docs/decisions/ADR-003-mysql.md) và [hướng dẫn MySQL](database/mysql/README.md). Đợt nền dữ liệu gồm schema, guards/views, demo seed và SQL kiểm tra; Repository, auth/policy runtime, service concurrency, checkpoint adapter và hash-chain verification chưa được bàn giao. Dữ liệu khởi đầu là mock và chưa xác định source of truth của hệ thống thật.
 
 
 ====================================================================
@@ -170,7 +172,7 @@ vị trí quyết định hệ thống có an toàn và ổn định khi vận h
     ┌───────────────────────────▼─────────────────────────────────┐
     │  Data Layer                                                 │
     │  - Repositories                                             │
-    │  - Row-Level Security                                       │
+    │  - Tenant foreign keys và least privilege                   │
     │  - Migrations                                               │
     │  - Audit Store (append-only)                                │
     └─────────────────────────────────────────────────────────────┘
@@ -375,7 +377,7 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
         supply_chain      → update_stock(-10000)  → Authorization ALLOWED
                                                   → Policy: REQUIRE_APPROVAL
 
-5.3. Phân quyền theo dữ liệu (Row-Level Security)
+5.3. Phân quyền theo dữ liệu và giới hạn cách ly của MySQL
 
     Đây là yêu cầu bắt buộc, không phải tùy chọn.
 
@@ -386,12 +388,25 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
         def get_my_order(order_id: str, ctx: RequestContext): ...
         # customer_id lấy từ ctx, không bao giờ từ LLM
 
-    Áp dụng đồng thời hai tầng bảo vệ:
-    - Application layer: mọi truy vấn đều gắn điều kiện tenant/customer từ RequestContext.
-    - Database layer: Row-Level Security policy theo tenant_id.
+    Thiết kế các lớp bảo vệ sau:
+    - Application layer: mọi truy vấn gắn điều kiện tenant từ RequestContext đã xác thực.
+      RequestContext/Repository và cơ chế kiểm tra quyền runtime còn cần triển khai.
+    - Database layer: composite foreign keys chứa tenant_id ngăn liên kết chéo tenant;
+      grants theo least privilege hạn chế thao tác. Các cơ chế này không lọc SELECT.
+    - MySQL không có native row-level policy tương đương PostgreSQL. Session variable
+      như @tenant_id không tự enforce quyền đọc; shared account có quyền SELECT trên
+      base tables vẫn có thể đọc dữ liệu nhiều tenant.
+    - Trước production phải chốt và kiểm chứng cách ly đọc database, ví dụ tách
+      database/account theo tenant hoặc routine/view có ranh giới danh tính được
+      kiểm chứng và không cấp quyền base-table trực tiếp. Gate này hiện còn mở.
+    - Connection pool và worker phải lấy scope từ context tin cậy và không reuse
+      sai context giữa các request. Schema/seed/view chưa triển khai cơ chế runtime này.
 
-    Kiểm thử bắt buộc: người dùng A không được đọc bất kỳ dữ liệu nào của người dùng B,
-    kể cả khi biết chính xác order_id.
+    Ví dụ get_my_order và kiểm thử customer A không đọc đơn của customer B là yêu cầu
+    cho customer-facing flow ở Phase 11, chưa được triển khai trong nền dữ liệu MVP.
+    Khi mở flow này, customer_id phải lấy từ authenticated context, kể cả khi người
+    gọi biết chính xác order_id. MVP vẫn phải kiểm thử actor tenant A không truy cập
+    dữ liệu tenant B khi xây Repository/authentication.
 
 5.4. Quản lý bí mật
 
@@ -443,13 +458,23 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
 
 6.1. Nguyên tắc thiết kế dữ liệu
 
-    - Mọi bảng nghiệp vụ có tenant_id (nếu hệ thống đa tenant).
+    - Schema khởi đầu có tenants và actors thuộc tenant; identity liên kết external
+      subject, chưa triển khai đăng nhập hoặc cấp quyền ứng dụng.
+    - Mọi bảng nghiệp vụ có tenant_id; liên kết nội bộ tenant dùng composite foreign
+      key chứa tenant_id. Quan hệ đúng tenant không thay thế kiểm tra quyền đọc.
+    - Mỗi product là một SKU; tồn kho dùng số nguyên, không backorder, reserved nằm
+      trong khoảng 0 đến on_hand. Đây là giả định khởi đầu cần xác nhận khi tích hợp thật.
+    - Tiền dùng DECIMAL cùng currency; timestamps dùng UTC, InnoDB và utf8mb4.
     - Mọi thao tác ghi có created_at, created_by, và dấu vết nguồn.
     - Không xóa cứng dữ liệu nghiệp vụ quan trọng; dùng soft delete có kiểm soát.
     - Dùng migration có version, không sửa schema thủ công.
     - Audit store là append-only, tách biệt khỏi bảng nghiệp vụ.
 
 6.2. Danh sách bảng nghiệp vụ
+
+    Danh sách dưới đây mô tả kiến trúc đích. Schema MVP triển khai Products, Orders,
+    OrderItems, Inventory, Warehouses cùng Tenants/Actors. Customers, Shipments,
+    Returns và SupportTickets thuộc Phase 11, chưa đưa vào migration khởi đầu.
 
     1.  Customers          — thông tin khách hàng (chứa PII, cần bảo vệ)
     2.  Products           — danh mục sản phẩm
@@ -463,6 +488,11 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
 
 6.3. Bảng bổ sung bắt buộc cho môi trường thực tế
 
+    Nền dữ liệu MVP dùng inventory_movements, idempotency_keys, workflow_runs,
+    audit_events và approval_requests. Approval có cấu trúc sẵn để triển khai trong
+    MVP; runtime approval/auth vẫn chưa có. Checkpoint adapter, tạo/kiểm chứng hash
+    chain, audit atomic cùng mutation và service concurrency thuộc các phase sau.
+
     10. InventoryMovements   — lịch sử biến động tồn kho (append-only)
     11. AgentActionLog       — nhật ký hành động của Agent (append-only)
     12. ApprovalRequests     — hàng đợi phê duyệt của con người
@@ -470,6 +500,10 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
     14. EvalRuns             — kết quả chạy bộ đánh giá (tùy chọn nhưng khuyến nghị)
 
 6.4. Chi tiết bảng quan trọng
+
+    Các trường dưới đây minh họa contract kiến trúc đích; tên cột, kiểu MySQL và
+    constraints thực thi chính xác lấy từ migration có version. Idempotency phải
+    unique theo tenant/actor/operation/key, không dùng key toàn cục cho mọi tenant.
 
     InventoryMovements (append-only):
         movement_id      PK
@@ -492,7 +526,7 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
         tenant_id
         requested_by     text         -- agent_id
         action           text
-        payload          jsonb
+        payload          JSON
         payload_hash     text         -- băm nội dung để chống sửa sau khi duyệt
         risk_level       text         -- MEDIUM | HIGH | CRITICAL
         status           text         -- PENDING | APPROVED | REJECTED | EXPIRED | CANCELLED | EXECUTED
@@ -508,7 +542,7 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
         actor_id
         operation        text
         request_hash     text
-        response_snapshot jsonb
+        response_snapshot JSON
         status           text         -- IN_PROGRESS | COMPLETED | FAILED
         created_at
         expires_at
@@ -523,14 +557,14 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
         agent_id
         tool_name
         action
-        input_redacted   jsonb        -- đã mask PII
+        input_redacted   JSON         -- đã mask PII
         result_status    text
         result_summary   text
         error_code       text
         risk_level       text
         approval_id      text | null
         duration_ms      int
-        token_usage      jsonb
+        token_usage      JSON
         created_at
         prev_hash        text         -- liên kết chuỗi để phát hiện sửa đổi
         record_hash      text
@@ -547,6 +581,20 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
 
     Lưu ý quan trọng: mock data chỉ dùng để phát triển và kiểm thử. Kế hoạch tích hợp
     nguồn dữ liệu thật là điều kiện tiên quyết trước khi triển khai vận hành.
+
+6.6. Artifact triển khai MySQL và phần chưa hoàn tất
+
+    - database/mysql/migrations/001_initial_schema.sql: schema khởi đầu.
+    - database/mysql/migrations/002_guards_and_views.sql: guards và views.
+    - database/mysql/seeds/001_demo.sql: dữ liệu demo/mock.
+    - database/mysql/bootstrap.sql: entry point dùng trong MySQL Workbench.
+    - database/mysql/README.md: hướng dẫn chạy và kiểm tra SQL.
+    - docs/decisions/ADR-003-mysql.md: quyết định và giả định nền dữ liệu.
+
+    Đây là nền database, chưa hoàn thành Repository, policy runtime, auth/customer
+    scope, service transaction/concurrency/idempotency, checkpoint adapter hoặc
+    hash-chain verification. Composite tenant FK và guards không thay thế các gate
+    của ứng dụng; source of truth, reconciliation và cách ly đọc DB production còn mở.
 
 
 ====================================================================
@@ -585,7 +633,8 @@ Mỗi Agent được định nghĩa bởi một hợp đồng tường minh, có
 
 7.3. Bất biến nghiệp vụ bắt buộc
 
-    - Tồn kho không âm (trừ khi policy cho phép backorder).
+    - Tồn kho không âm; schema khởi đầu không cho backorder. Nếu nghiệp vụ sau này
+      cần backorder, phải chốt policy và thay đổi schema/service bằng migration.
     - Số lượng thay đổi tồn kho không vượt ngưỡng cấu hình mà không có phê duyệt.
     - Không cập nhật tồn kho của kho ngoài phạm vi phân công.
     - Không cập nhật đơn hàng đã ở trạng thái kết thúc.
@@ -924,7 +973,8 @@ trước khi triển khai chính thức.
 
     Nội dung:
     - Thiết kế schema và migration có version.
-    - Xây Repository với Row-Level Security theo tenant/customer.
+    - Xây Repository áp tenant scope từ context tin cậy, composite tenant FK và least
+      privilege. Chốt cách ly đọc database production; customer scope thuộc Phase 11.
     - Xây Audit Store append-only với hash chain.
     - Xây bảng IdempotencyKeys.
     - Xây RequestContext và lớp xác thực.
@@ -974,7 +1024,7 @@ trước khi triển khai chính thức.
 
     Thứ tự triển khai MVP: Data Agent trước, sau đó Supply Chain Agent,
     rồi Executive Planner để điều phối hai Agent chuyên môn.
-    Customer Support Agent là post-MVP, thuộc Phase 11 trong PlanPhase.md.
+    Customer Support Agent là post-MVP, thuộc Phase 11 trong PlanPhase.txt.
 
     Điều kiện hoàn thành:
     - Mỗi Agent chạy độc lập và trả về đúng schema trong mọi tình huống kiểm thử.
@@ -1007,7 +1057,7 @@ trước khi triển khai chính thức.
     - Dựng Audit Trace Viewer theo workflow_id.
 
     Giao diện Chat cho khách hàng và Customer Support Agent là post-MVP,
-    thuộc Phase 11 trong PlanPhase.md.
+    thuộc Phase 11 trong PlanPhase.txt.
 
     Thông tin hiển thị trên trace:
     - Yêu cầu người dùng
@@ -1147,7 +1197,7 @@ Luôn có kill switch để tạm dừng toàn bộ hành động ghi trong trư
     | Rủi ro                                   | Mức độ   | Biện pháp                                      |
     |------------------------------------------|----------|------------------------------------------------|
     | Hành động ghi sai do LLM                 | Nghiêm trọng | Allowlist cứng, Policy Engine, HITL, idempotency |
-    | Rò rỉ dữ liệu giữa khách hàng            | Nghiêm trọng | RLS hai tầng, tham số định danh từ token       |
+    | Rò rỉ dữ liệu giữa tenant/khách hàng     | Nghiêm trọng | Scope từ identity, least privilege; gate cách ly đọc DB |
     | Ghi trùng do retry                       | Cao      | Idempotency key bắt buộc cho mọi lệnh ghi      |
     | Prompt injection qua dữ liệu             | Cao      | Data envelope, schema validation, injection suite |
     | Chi phí LLM vượt kiểm soát               | Cao      | Ngân sách token, cache, rule tất định, alert    |
