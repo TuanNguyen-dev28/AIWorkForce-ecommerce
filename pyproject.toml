@@ -1,0 +1,48 @@
+[project]
+name = "aiworkforce-ecommerce"
+version = "0.1.0"
+description = "Deterministic development foundation for AI Workforce E-commerce"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "pydantic-settings>=2.8,<3",
+  "pymysql[rsa]>=1.1.1,<2",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+  "mypy>=1.15,<2",
+  "types-PyMySQL>=1.1",
+  "pip-audit>=2.8,<3",
+  "detect-secrets>=1.5,<2",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["database/mysql/scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["api", "agents", "orchestration", "tools", "services", "business", "security", "audit", "database/migrate.py", "database/connection.py", "database/sql.py", "schemas", "approvals", "llm", "observability", "evaluation", "ui", "config", "fixtures", "tests", "scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "evaluation"]
+addopts = "-ra --strict-markers"
+markers = [
+  "security: security boundary and regression tests",
+  "evaluation: deterministic evaluation harness",
+  "integration: requires an isolated MySQL database (TEST_MYSQL=1)",
+]

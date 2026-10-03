@@ -7,3 +7,13 @@ __pycache__/
 *.mwb.bak
 *.mwb.lck
 database/mysql/local/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+!.env.*.example

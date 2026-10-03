@@ -1,0 +1,47 @@
+services:
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_ENV: dev
+      DATABASE_ENABLED: 'true'
+      DATABASE_HOST: mysql
+      DATABASE_USER: aiworkforce_dev
+      DATABASE_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD in your local environment}
+      LLM_PROVIDER: mock
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  migrate:
+    build: .
+    command: ["/app/.venv/bin/python", "-m", "database.migrate", "apply"]
+    environment:
+      APP_ENV: dev
+      DATABASE_ENABLED: 'true'
+      DATABASE_HOST: mysql
+      DATABASE_USER: aiworkforce_dev
+      DATABASE_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD in your local environment}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+  mysql:
+    image: mysql:8.0.46
+    # Local dev only: triggers can be created without granting global SUPER.
+    command: ["--skip-log-bin"]
+    environment:
+      MYSQL_DATABASE: aiworkforce_ecommerce
+      MYSQL_USER: aiworkforce_dev
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD in your local environment}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in your local environment}
+    volumes:
+      - mysql_dev:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+volumes:
+  mysql_dev:

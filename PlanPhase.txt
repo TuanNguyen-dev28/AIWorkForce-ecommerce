@@ -162,6 +162,10 @@ Loại bỏ các giả định chưa được kiểm chứng trước khi thiế
 
 # Phase 1 — Khởi tạo repository, môi trường và chất lượng mã nguồn
 
+**Tiến độ triển khai:** xem [Phase 1 status](docs/phase-1-status.md) và [README](README.md).
+Các kiểm tra local và gate trên GitHub được ghi riêng; có workflow CI không đồng nghĩa
+required status checks đã được bật trên remote.
+
 ## Mục tiêu
 
 Tạo nền tảng phát triển lặp lại được, có kiểm tra tự động và tách môi trường.
